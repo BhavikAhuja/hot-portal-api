@@ -176,12 +176,9 @@ async def download_document(
     if not record_id:
         raise HTTPException(status_code=404, detail="Record ID not found")
 
-    # 4. Make sure the file field actually has a file
-    field_val = record.get(zoho_field, "")
-    if not field_val:
-        raise HTTPException(status_code=404, detail=f"No {zoho_field} uploaded for this job yet.")
-
-    # 5. Stream the file from Zoho Creator's download endpoint
+    # 4. Stream the file from Zoho Creator's download endpoint.
+    #    (We don't pre-check the file field because the report response may not
+    #     include file-upload fields; Zoho returns 404 if the field is empty.)
     download_url = (
         f"{ZOHO_API_BASE_V21}/report/{REPORT_PROJECTS}/{record_id}/{zoho_field}/download"
     )

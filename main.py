@@ -1,8 +1,11 @@
 import os
 import httpx
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from urllib.parse import quote
+import io
 
 app = FastAPI(title="HoT Portal API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET","POST","OPTIONS"], allow_headers=["*"])
@@ -13,8 +16,19 @@ ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN", "")
 WEBHOOK_SECRET     = os.getenv("WEBHOOK_SECRET", "hot-secret")
 FIREBASE_API_KEY   = "AIzaSyBmEFd1xIRY7I8XVSePqAHYIDeQ-iqpDmE"
 ZOHO_API_BASE      = "https://creator.zoho.in/api/v2/houseoftesting/house-of-testing-lab"
+# v2.1 base is needed for the file download endpoint
+ZOHO_API_BASE_V21  = "https://www.zohoapis.in/creator/v2.1/data/houseoftesting/house-of-testing-lab"
 REPORT_PROJECTS    = "Booked_Projects"
 REPORT_SRFS        = "SRF1_Report"
+
+# Which Creator file-upload fields a client is allowed to download
+ALLOWED_DOC_FIELDS = {
+    "test_report":  "Test_Report",
+    "raw_data":     "Raw_Data_Sheet",
+    "trf":          "TRF",
+    "previous":     "Previous_Report",
+    "ccl":          "CCL",
+}
 
 async def get_zoho_token():
     if not ZOHO_REFRESH_TOKEN:
@@ -117,6 +131,90 @@ async def get_srfs(authorization: str = Header(default="")):
 
     sample = [{"SRF_ID": "SRF-SAMPLE", "SRF_Status": "Submitted", "Product_Sample_Details_Technical_specifications": "Sample", "Test_Requirement": "IS 16047", "Added_Time": "1-Jun-2026", "Manufacturer_Name": "Test", "Brand_Name": "Test", "Model_Name": "M1", "Email_id": email}]
     return {"email": email, "count": len(sample), "data": sample, "mode": "SAMPLE"}
+
+
+# ──────────────────────────────────────────────────────────────
+#  SECURE DOCUMENT DOWNLOAD
+#  Client never sees a WorkDrive link. Portal calls this endpoint,
+#  we verify the client owns the job, then stream the file from Zoho.
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/download")
+async def download_document(
+    job_id: str,
+    field: str = "test_report",
+    authorization: str = Header(default="")
+):
+    print(f"[REQ] /api/download job={job_id} field={field}")
+
+    # 1. Verify the caller is a logged-in client
+    id_token = extract_token(authorization)
+    email = await verify_firebase_token(id_token)
+    print(f"[OK] Email verified: {email}")
+
+    # 2. Validate requested field
+    field_key = field.lower().strip()
+    if field_key not in ALLOWED_DOC_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Unknown document type: {field}")
+    zoho_field = ALLOWED_DOC_FIELDS[field_key]
+
+    if not ZOHO_REFRESH_TOKEN:
+        raise HTTPException(status_code=503, detail="Server not connected to Zoho")
+
+    token = await get_zoho_token()
+
+    # 3. CRITICAL: confirm this job belongs to THIS client.
+    #    We query the project by BOTH job id AND the caller's email.
+    #    If no record comes back, the client does not own this job → block.
+    criteria = f'(JOB_ID == "{job_id}" && Customer_Email == "{email}")'
+    rows = await fetch_zoho(REPORT_PROJECTS, criteria, token)
+    if not rows:
+        print(f"[BLOCKED] {email} tried to access job {job_id} (not theirs / not found)")
+        raise HTTPException(status_code=403, detail="You do not have access to this document.")
+
+    record = rows[0]
+    record_id = str(record.get("ID", ""))
+    if not record_id:
+        raise HTTPException(status_code=404, detail="Record ID not found")
+
+    # 4. Make sure the file field actually has a file
+    field_val = record.get(zoho_field, "")
+    if not field_val:
+        raise HTTPException(status_code=404, detail=f"No {zoho_field} uploaded for this job yet.")
+
+    # 5. Stream the file from Zoho Creator's download endpoint
+    download_url = (
+        f"{ZOHO_API_BASE_V21}/report/{REPORT_PROJECTS}/{record_id}/{zoho_field}/download"
+    )
+    print(f"[DOWNLOAD] fetching {download_url}")
+
+    async with httpx.AsyncClient() as c:
+        r = await c.get(
+            download_url,
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            timeout=60
+        )
+        if r.status_code != 200:
+            print(f"[DOWNLOAD ERR] status={r.status_code} body={r.text[:200]}")
+            raise HTTPException(status_code=502, detail="Could not fetch file from Zoho")
+
+        content = r.content
+        # Try to keep the original filename from Zoho's headers
+        cd = r.headers.get("content-disposition", "")
+        filename = f"{job_id}_{zoho_field}.pdf"
+        if "filename=" in cd:
+            raw = cd.split("filename=")[-1].strip().strip('"')
+            if raw:
+                filename = raw
+        ctype = r.headers.get("content-type", "application/octet-stream")
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=ctype,
+        headers={
+            "Content-Disposition": f'attachment; filename="{quote(filename)}"'
+        }
+    )
+
 
 class WebhookPayload(BaseModel):
     email: str

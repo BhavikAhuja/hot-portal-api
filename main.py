@@ -28,24 +28,27 @@ async def add_note(
     record = rows[0]
     record_id = str(record.get("ID",""))
     existing_remarks = str(record.get("Project_Remarks2","") or "")
-    coordinator_email = str(record.get("Project_Coordinator_Email","") or
-                           record.get("Project_Manager_Email","") or "")
 
-    # 2. Append new note to existing remarks
+    # 2. Append new note with timestamp
     from datetime import datetime
     timestamp = datetime.now().strftime("%d-%b-%Y %H:%M")
     new_remark = f"[Client Note - {timestamp}]\n{note}"
     updated_remarks = (existing_remarks + "\n\n" + new_remark).strip()
 
-    # 3. Update Project_Remarks2 in Zoho
+    # 3. Update Project_Remarks2 in Zoho using correct API
     async with httpx.AsyncClient() as c:
         r = await c.patch(
-            f"{ZOHO_API_BASE}/form/{REPORT_PROJECTS}/{record_id}",
-            headers={"Authorization": f"Zoho-oauthtoken {token}"},
-            json={"Project_Remarks2": updated_remarks},
+            f"{ZOHO_API_BASE}/report/{REPORT_PROJECTS}/{record_id}",
+            headers={
+                "Authorization": f"Zoho-oauthtoken {token}",
+                "Content-Type": "application/json"
+            },
+            json={"data": {"Project_Remarks2": updated_remarks}},
             timeout=15
         )
-        print(f"[ZOHO UPDATE] status={r.status_code}")
+        print(f"[ZOHO UPDATE] status={r.status_code} body={r.text[:200]}")
+        if r.status_code not in [200, 201]:
+            raise HTTPException(status_code=502, detail=f"Zoho update failed: {r.text[:200]}")
 
     print(f"[NOTE] Saved for job {job_id} by {email}")
     return {"status": "ok", "message": "Note saved and coordinator alerted"}

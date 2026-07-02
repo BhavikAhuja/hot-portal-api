@@ -52,7 +52,7 @@ async def verify_firebase_token(id_token: str) -> str:
     async with httpx.AsyncClient() as c:
         r = await c.post(url, json={"idToken": id_token}, timeout=10)
         data = r.json()
-        print(f"[FIREBASE] status={r.status_code} response={str(data)[:200]}")
+        print(f"[FIREBASE] status={r.status_code}")
         if r.status_code != 200:
             raise HTTPException(status_code=401, detail=f"Firebase error: {data}")
         if "users" not in data or not data["users"]:
@@ -76,8 +76,7 @@ async def fetch_zoho(report: str, criteria: str, token: str) -> list:
 def extract_token(auth: str) -> str:
     parts = auth.strip().split(" ")
     if len(parts) != 2 or parts[0] != "Bearer":
-        print(f"[AUTH ERROR] Bad header: '{auth[:50]}'")
-        raise HTTPException(status_code=401, detail=f"Invalid auth header. Got: '{auth[:30]}'")
+        raise HTTPException(status_code=401, detail=f"Invalid auth header.")
     return parts[1]
 
 @app.get("/health")
@@ -95,7 +94,7 @@ async def get_projects(authorization: str = Header(default="")):
     print(f"[REQ] /api/projects")
     id_token = extract_token(authorization)
     email = await verify_firebase_token(id_token)
-    print(f"[OK] Email verified: {email}")
+    print(f"[OK] Email: {email}")
 
     if ZOHO_REFRESH_TOKEN:
         try:
@@ -105,7 +104,23 @@ async def get_projects(authorization: str = Header(default="")):
         except Exception as e:
             print(f"[ZOHO ERR] {e}")
 
-    sample = [{"JOB_ID": "SAMPLE-001", "Project_Status": "Testing Started", "Standard": "IS 16047", "Product": "Sample", "Lead_Model": "M1", "Manufacturer_Name": "Test", "Booking_Date": "1-Jun-2026", "Testing_Start_Date": "5-Jun-2026", "Final_Report_Issue_Date": "", "Raw_Data_Sheet_Status": "Testing", "Test_Report_Download_Link": "", "Customer_Name": email.split("@")[0].title(), "Customer_Email": email}]
+    sample = [{
+        "JOB_ID": "SAMPLE-001",
+        "Project_Status": "Testing Started",
+        "Standard": "IS 16047",
+        "Product": "Sample",
+        "Lead_Model": "M1",
+        "Manufacturer_Name": "Test",
+        "Booking_Date": "1-Jun-2026",
+        "Testing_Start_Date": "5-Jun-2026",
+        "Final_Report_Issue_Date": "",
+        "Raw_Data_Sheet_Status": "Testing",
+        "Test_Report_Download_Link": "",
+        "Payment_Status": "",
+        "Project_Remarks": "",
+        "Customer_Name": email.split("@")[0].title(),
+        "Customer_Email": email
+    }]
     return {"email": email, "count": len(sample), "data": sample, "mode": "SAMPLE"}
 
 @app.get("/api/srfs")
@@ -113,7 +128,7 @@ async def get_srfs(authorization: str = Header(default="")):
     print(f"[REQ] /api/srfs")
     id_token = extract_token(authorization)
     email = await verify_firebase_token(id_token)
-    print(f"[OK] Email verified: {email}")
+    print(f"[OK] Email: {email}")
 
     if ZOHO_REFRESH_TOKEN:
         try:
@@ -123,7 +138,17 @@ async def get_srfs(authorization: str = Header(default="")):
         except Exception as e:
             print(f"[ZOHO ERR] {e}")
 
-    sample = [{"SRF_ID": "SRF-SAMPLE", "SRF_Status": "Submitted", "Product_Sample_Details_Technical_specifications": "Sample", "Test_Requirement": "IS 16047", "Added_Time": "1-Jun-2026", "Manufacturer_Name": "Test", "Brand_Name": "Test", "Model_Name": "M1", "Email_id": email}]
+    sample = [{
+        "SRF_ID": "SRF-SAMPLE",
+        "SRF_Status": "Submitted",
+        "Product_Sample_Details_Technical_specifications": "Sample",
+        "Test_Requirement": "IS 16047",
+        "Added_Time": "1-Jun-2026",
+        "Manufacturer_Name": "Test",
+        "Brand_Name": "Test",
+        "Model_Name": "M1",
+        "Email_id": email
+    }]
     return {"email": email, "count": len(sample), "data": sample, "mode": "SAMPLE"}
 
 @app.get("/api/download")
@@ -159,7 +184,11 @@ async def download_document(
     print(f"[DOWNLOAD] {download_url}")
 
     async with httpx.AsyncClient() as c:
-        r = await c.get(download_url, headers={"Authorization": f"Zoho-oauthtoken {token}"}, timeout=60)
+        r = await c.get(
+            download_url,
+            headers={"Authorization": f"Zoho-oauthtoken {token}"},
+            timeout=60
+        )
         if r.status_code != 200:
             raise HTTPException(status_code=502, detail="Could not fetch file from Zoho")
         content = r.content
@@ -206,14 +235,14 @@ async def add_note(
 
     record = rows[0]
     record_id = str(record.get("ID", ""))
-    existing_remarks = str(record.get("Project_Remarks2", "") or "")
+    existing_remarks = str(record.get("Project_Remarks", "") or "")
 
     # 2. Append new note with timestamp
     timestamp = datetime.now().strftime("%d-%b-%Y %H:%M")
     new_remark = f"[Client Note - {timestamp}]\n{note}"
     updated_remarks = (existing_remarks + "\n\n" + new_remark).strip()
 
-    # 3. Update Project_Remarks2 in Zoho
+    # 3. Update Project_Remarks in Zoho
     async with httpx.AsyncClient() as c:
         r = await c.patch(
             f"{ZOHO_API_BASE}/report/{REPORT_PROJECTS}/{record_id}",
@@ -221,7 +250,7 @@ async def add_note(
                 "Authorization": f"Zoho-oauthtoken {token}",
                 "Content-Type": "application/json"
             },
-            json={"data": {"Project_Remarks2": updated_remarks}},
+            json={"data": {"Project_Remarks": updated_remarks}},
             timeout=15
         )
         print(f"[ZOHO UPDATE] status={r.status_code} body={r.text[:200]}")
